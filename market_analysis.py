@@ -6,10 +6,9 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- 頁面與樣式設定 (設定 initial_sidebar_state="expanded" 讓側邊欄預設直接展開) ---
+# --- 頁面與樣式設定 (initial_sidebar_state="expanded" 讓側邊欄預設直接展開) ---
 st.set_page_config(
     page_title="台股全市場智慧量化與K線型態分析平台", 
     layout="wide",
@@ -92,7 +91,7 @@ def get_all_tw_tickers_and_names():
         }
     return mapping
 
-# --- 抓取三大法人買賣超資料 (單位：換算為「張」，並加入快取加速) ---
+# --- 抓取三大法人買賣超資料 (單位：張) ---
 @st.cache_data(ttl=3600)
 def get_institutional_investors(ticker_code):
     clean_code = ticker_code.split('.')[0]
@@ -210,7 +209,6 @@ def calculate_indicators(df):
     df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
     df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
     
-    # 策略判定
     df['Turn_Strong'] = (
         (df['MACD_Hist'].shift(1) < 0) & (df['MACD_Hist'] > df['MACD_Hist'].shift(1)) &
         (df['K'] >= 15) & (df['K'] <= 40) &
@@ -336,7 +334,6 @@ def generate_ai_score_and_analysis(df):
     score = max(0, min(100, round(score, 1)))
     return score, pros, cons
 
-# --- 快取化單檔股票運算 Worker 函數 (加入快取加速) ---
 @st.cache_data(ttl=3600)
 def process_single_ticker(ticker, selected_start, is_auto_scan=True):
     try:
@@ -354,7 +351,6 @@ def process_single_ticker(ticker, selected_start, is_auto_scan=True):
         curr = df.iloc[-1]
         avg_vol_20 = curr['Vol_MA20']
 
-        # 核心防禦邏輯：若全市場自動掃描，20日均量小於 100 張則直接剔除
         if is_auto_scan and avg_vol_20 < 100000:
             return None, None
 
@@ -566,7 +562,6 @@ if 'res_df' in st.session_state:
             target_df = calculate_indicators(target_df_raw)
             stock_row = res_df[res_df['股票代號'] == selected_stock].iloc[0] if not res_df[res_df['股票代號'] == selected_stock].empty else {"股票名稱": selected_stock, "產業類別": "一般產業"}
             
-            # 檢查流動性警示（若成交量過低，跳出警告）
             curr_vol_lots = int(target_df.iloc[-1]['Volume'] // 1000)
             curr_avg_lots = int(target_df.iloc[-1]['Vol_MA20'] // 1000)
             if curr_avg_lots < 100:
@@ -653,4 +648,12 @@ if 'res_df' in st.session_state:
             fig.add_trace(go.Scatter(x=target_df.index, y=target_df['D'], line=dict(color='cyan', width=1.2), name="D值"), row=5, col=1)
 
             fig.update_layout(height=950, xaxis_rangeslider_visible=False, showlegend=True, margin=dict(l=20, r=20, t=30, b=20))
-            st.plotly_chart(fig, use_container_width=True)
+            
+            # 手機防擠壓與防手殘配置
+            chart_config = {
+                'scrollZoom': True,
+                'displayModeBar': True,
+                'responsive': True,
+                'doubleClick': 'reset'
+            }
+            st.plotly_chart(fig, use_container_width=True, config=chart_config)

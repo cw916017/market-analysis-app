@@ -9,8 +9,12 @@ import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- 頁面與樣式設定 ---
-st.set_page_config(page_title="台股全市場智慧量化與K線型態分析平台", layout="wide")
+# --- 頁面與樣式設定 (設定 initial_sidebar_state="expanded" 讓側邊欄預設直接展開) ---
+st.set_page_config(
+    page_title="台股全市場智慧量化與K線型態分析平台", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 st.markdown("""
     <style>
@@ -88,7 +92,7 @@ def get_all_tw_tickers_and_names():
         }
     return mapping
 
-# --- 抓取三大法人買賣超資料 (單位：換算為「張」) ---
+# --- 抓取三大法人買賣超資料 (單位：換算為「張」，並加入快取加速) ---
 @st.cache_data(ttl=3600)
 def get_institutional_investors(ticker_code):
     clean_code = ticker_code.split('.')[0]
@@ -106,7 +110,6 @@ def get_institutional_investors(ticker_code):
                                 return int(val.replace(",", ""))
                             except:
                                 return 0
-                        # 證交所原始資料為「股」，除以 1000 轉為「張」
                         foreign = parse_num(row[2]) // 1000
                         trust = parse_num(row[4]) // 1000
                         dealer = (parse_num(row[5]) + parse_num(row[6])) // 1000
@@ -333,7 +336,8 @@ def generate_ai_score_and_analysis(df):
     score = max(0, min(100, round(score, 1)))
     return score, pros, cons
 
-# --- 單檔股票運算 Worker 函數 ---
+# --- 快取化單檔股票運算 Worker 函數 (加入快取加速) ---
+@st.cache_data(ttl=3600)
 def process_single_ticker(ticker, selected_start, is_auto_scan=True):
     try:
         data = yf.download(ticker, start=selected_start, progress=False, threads=False)

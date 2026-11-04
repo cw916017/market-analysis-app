@@ -137,6 +137,18 @@ with tabs[0]:
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.035,
                         row_heights=[.52, .16, .16, .16], subplot_titles=("股價與均線", "成交量", "MACD", "RSI / KD"))
     fig.add_trace(go.Candlestick(x=df.index, open=df.Open, high=df.High, low=df.Low, close=df.Close, name="K 線"), row=1, col=1)
+    candle_data = np.column_stack((df.Open, df.High, df.Low, df.Close, df.Volume / 1000))
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df.Close, mode="markers", name="每日行情",
+        marker={"size": 14, "opacity": .01, "color": "#111827"},
+        customdata=candle_data, showlegend=False,
+        hovertemplate=(
+            "日期：%{x|%Y-%m-%d}<br>開盤：%{customdata[0]:.2f}"
+            "<br>最高：%{customdata[1]:.2f}<br>最低：%{customdata[2]:.2f}"
+            "<br>收盤：%{customdata[3]:.2f}<br>成交量：%{customdata[4]:,.0f} 張"
+            "<extra></extra>"
+        ),
+    ), row=1, col=1)
     for n, color in ((20, "orange"), (60, "royalblue"), (120, "purple")):
         fig.add_trace(go.Scatter(x=df.index, y=df[f"MA{n}"], name=f"MA{n}", line={"color": color, "width": 1}), row=1, col=1)
     colors = np.where(df.Close >= df.Open, "#d94a4a", "#159570")
@@ -148,7 +160,25 @@ with tabs[0]:
     fig.add_trace(go.Scatter(x=df.index, y=df.K, name="K"), row=4, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df.D, name="D"), row=4, col=1)
     fig.update_layout(height=850, xaxis_rangeslider_visible=False, margin={"l": 10, "r": 10, "t": 50, "b": 10}, legend={"orientation": "h"})
-    st.plotly_chart(fig, use_container_width=True)
+    chart_event = st.plotly_chart(
+        fig, use_container_width=True, key=f"price_chart_{symbol}_{interval}",
+        on_select="rerun", selection_mode="points",
+    )
+    selected_points = chart_event.selection.points
+    candle_point = next((p for p in reversed(selected_points) if p.get("curve_number") == 1), None)
+    if candle_point is not None:
+        point_index = candle_point.get("point_index", candle_point.get("point_number"))
+        if point_index is not None and 0 <= point_index < len(df):
+            selected_bar = df.iloc[point_index]
+            st.markdown(f"#### 選取日期：{df.index[point_index].strftime('%Y-%m-%d')}")
+            detail_cols = st.columns(5)
+            detail_cols[0].metric("開盤", fmt(selected_bar.Open))
+            detail_cols[1].metric("最高", fmt(selected_bar.High))
+            detail_cols[2].metric("最低", fmt(selected_bar.Low))
+            detail_cols[3].metric("收盤", fmt(selected_bar.Close))
+            detail_cols[4].metric("成交量", f"{float(selected_bar.Volume)/1000:,.0f} 張")
+    else:
+        st.caption("將滑鼠移到 K 線可查看該日價格與成交量；點選 K 線可固定顯示該日資料。")
     st.markdown("**技術觀察**")
     notes = []
     if pd.notna(last.MA20):

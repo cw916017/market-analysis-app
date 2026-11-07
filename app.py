@@ -172,7 +172,7 @@ def add_candlestick_patterns(d: pd.DataFrame) -> pd.DataFrame:
         "貫穿線": (prev_c < prev_o) & (c > o) & (o < prev_c) & (c > (prev_o + prev_c) / 2) & (c < prev_o),
         "烏雲罩頂": (prev_c > prev_o) & (c < o) & (o > prev_c) & (c < (prev_o + prev_c) / 2) & (c > prev_o),
     }
-    o2, c2, o3, c3 = o.shift(2), c.shift(2), o.shift(0), c.shift(0)
+    o2, c2 = o.shift(2), c.shift(2)
     middle_small = (c.shift(1) - o.shift(1)).abs() <= (h.shift(1) - l.shift(1)) * .35
     signals["晨星"] = (c2 < o2) & (prev_body > (h.shift(2) - l.shift(2)) * .5) & middle_small & (c > o) & (body > span * .5) & (c > (o2 + c2) / 2)
     signals["夜星"] = (c2 > o2) & (prev_body > (h.shift(2) - l.shift(2)) * .5) & middle_small & (c < o) & (body > span * .5) & (c < (o2 + c2) / 2)
@@ -186,6 +186,65 @@ PATTERN_COLUMNS = ["鎚子線", "倒鎚子線", "流星線", "十字線", "多�
 
 def active_patterns(row: pd.Series) -> list[str]:
     return [name for name in PATTERN_COLUMNS if bool(row.get(f"PAT_{name}", False))]
+
+
+def technical_assessment(data: pd.DataFrame) -> dict:
+    """Transparent, rule-based after-hours score from 0 to 100."""
+    if len(data) < 2:
+        return {"score": 50, "label": "資料不足", "reasons": []}
+    cur, prev = data.iloc[-1], data.iloc[-2]
+    score, reasons = 50, []
+    if pd.notna(cur.MA20):
+        score += 15 if cur.Close > cur.MA20 else -15
+        reasons.append("收盤站上 MA20" if cur.Close > cur.MA20 else "收盤低於 MA20")
+    if pd.notna(cur.MA5) and pd.notna(cur.MA20):
+        score += 10 if cur.MA5 > cur.MA20 else -10
+        reasons.append("MA5 高於 MA20" if cur.MA5 > cur.MA20 else "MA5 低於 MA20")
+    if cur.Hist > 0:
+        score += 10
+        reasons.append("MACD 柱在零軸上方")
+    else:
+        score -= 10
+        reasons.append("MACD 柱在零軸下方")
+    if cur.Hist > prev.Hist:
+        score += 8
+        reasons.append("MACD 柱體改善")
+    elif cur.Hist < prev.Hist:
+        score -= 8
+        reasons.append("MACD 柱體轉弱")
+    if cur.K > cur.D:
+        score += 8
+        reasons.append("KD 為 K 線在 D 線上方")
+    else:
+        score -= 8
+        reasons.append("KD 為 K 線在 D 線下方")
+    if pd.notna(cur.RSI14):
+        if 50 <= cur.RSI14 <= 70:
+            score += 8
+            reasons.append("RSI 位於 50–70 區間")
+        elif cur.RSI14 > 70:
+            score -= 5
+            reasons.append("RSI > 70，列為偏熱提醒")
+        elif cur.RSI14 < 30:
+            score += 2
+            reasons.append("RSI < 30，列為超賣觀察（仍可能續跌）")
+        else:
+            reasons.append("RSI 位於 30–50 區間")
+    patterns = active_patterns(cur)
+    bullish = {"鎚子線", "倒鎚子線", "多頭吞噬", "多頭母子", "貫穿線", "晨星"}
+    bearish = {"流星線", "空頭吞噬", "空頭母子", "烏雲罩頂", "夜星"}
+    if bullish.intersection(patterns):
+        score += 5
+        reasons.append("出現偏多 K 線型態：" + "、".join(sorted(bullish.intersection(patterns))))
+    if bearish.intersection(patterns):
+        score -= 5
+        reasons.append("出現偏空 K 線型態：" + "、".join(sorted(bearish.intersection(patterns))))
+    if pd.notna(cur.VolMA20) and cur.Volume > cur.VolMA20 * 1.2:
+        score += 4 if cur.Close > cur.Open else -4
+        reasons.append("成交量高於 20 日均量 1.2 倍")
+    score = int(max(0, min(100, score)))
+    label = "偏多觀察" if score >= 65 else "偏空警示" if score <= 40 else "中性觀察"
+    return {"score": score, "label": label, "reasons": reasons}
 
 
 def pct_return(series: pd.Series, days: int) -> float:
@@ -268,6 +327,12 @@ c2.metric("成交量", f"{float(last.Volume)/1000:,.0f} 張" if pd.notna(last.Vo
 c3.metric("RSI (14)", fmt(last.RSI14))
 c4.metric("MACD 柱", fmt(last.Hist))
 c5.metric("20 日均量", f"{float(last.VolMA20)/1000:,.0f} 張" if pd.notna(last.VolMA20) else "—")
+assessment = technical_assessment(df)
+signal_cols = st.columns([1, 1, 5])
+signal_cols[0].metric("技術評分", f"{assessment['score']:+d} / 100")
+signal_cols[1].metric("盤後判讀", assessment["label"])
+signal_cols[2].caption("評分依趨勢、MACD、KD、RSI、K 線型態和量能規則計算。" + "；".join(assessment["reasons"]))
+st.caption("這是最新可取得日線的規則化觀察，不是即時盤中訊號或個人化買賣指令；RSI 超買可能仍沿趨勢上漲，超賣也可能續跌。")
 
 tabs = st.tabs(["個股圖表", "大盤比較", "基本面與消息", "籌碼觀察", "觀察清單掃描"])
 with tabs[0]:
@@ -427,16 +492,23 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader("盤後選股雷達")
-    st.markdown("輸入一組股票代號，依技術訊號和最新三大法人買賣超篩選。所選條件採全部符合（AND）；資料以收盤後可取得的最新日資料為準。")
+    st.markdown("輸入台股代號清單，依技術訊號和最新三大法人買賣超篩選。可選全部符合（AND）或任一符合（OR）；資料以可取得的最新日線為準。")
+    st.caption("目前掃描你提供的代號清單，尚未自動遍歷全部上市櫃股票；上市代號加 .TW、上櫃代號加 .TWO。")
     watch = st.text_area("掃描清單（上市 .TW、上櫃 .TWO，以逗號或換行分隔）", DEFAULT_WATCHLIST, height=90)
     technical_options = [
         "收盤站上 MA20", "MA5 高於 MA20", "MACD 柱為正", "MACD 柱較前日增加",
-        "RSI 介於 50–70", "KD 黃金交叉", "收盤站上布林中軌", "成交量大於 20 日均量 1.5 倍",
+        "RSI > 70（偏熱）", "RSI < 30（超賣觀察）", "RSI 約 50（45–55）",
+        "RSI 50–70（偏強區）", "KD 金叉（今日剛交叉）", "KD 死叉（今日剛交叉）",
+        "K > D（KD 偏多）", "K < D（KD 偏空）", "MACD 綠棒趨近零（負柱收斂）",
+        "MACD 紅棒趨近零（正柱收斂）", "MACD 柱由負翻正", "MACD 柱由正翻負",
+        "收盤站上布林中軌", "成交量大於 20 日均量 1.5 倍",
         "突破前 20 日高點",
     ]
     pattern_options = [f"K線：{name}" for name in PATTERN_COLUMNS]
     technical_options += pattern_options
-    selected_technical = st.multiselect("技術條件", technical_options, default=["收盤站上 MA20", "MACD 柱為正"])
+    selected_technical = st.multiselect("技術條件（可複選）", technical_options, default=[])
+    macd_zero_tolerance = st.slider("MACD 柱體「趨近零」範圍（占股價百分比）", 0.01, 1.00, 0.20, 0.01)
+    match_mode = st.radio("條件組合", ["全部符合（AND）", "任一符合（OR）"], horizontal=True)
     chip_options = ["外資買超", "投信買超", "自營商買超", "三大法人合計買超"]
     selected_chips = st.multiselect("籌碼條件（最新交易日）", chip_options)
     min_avg_volume = st.number_input("最低 20 日均量（張）", min_value=0, max_value=100000, value=100, step=100)
@@ -455,13 +527,24 @@ with tabs[4]:
                         bar.progress((i + 1) / len(symbols))
                         continue
                     prior_20_high = calc.High.shift(1).rolling(20).max().iloc[-1]
+                    hist_pct = abs(float(cur.Hist) / float(cur.Close) * 100) if cur.Close else np.inf
                     tech_check = {
                         "收盤站上 MA20": cur.Close > cur.MA20,
                         "MA5 高於 MA20": cur.MA5 > cur.MA20,
                         "MACD 柱為正": cur.Hist > 0,
                         "MACD 柱較前日增加": cur.Hist > prev.Hist,
-                        "RSI 介於 50–70": 50 <= cur.RSI14 <= 70,
-                        "KD 黃金交叉": cur.K > cur.D and prev.K <= prev.D,
+                        "RSI > 70（偏熱）": cur.RSI14 > 70,
+                        "RSI < 30（超賣觀察）": cur.RSI14 < 30,
+                        "RSI 約 50（45–55）": 45 <= cur.RSI14 <= 55,
+                        "RSI 50–70（偏強區）": 50 <= cur.RSI14 <= 70,
+                        "KD 金叉（今日剛交叉）": cur.K > cur.D and prev.K <= prev.D,
+                        "KD 死叉（今日剛交叉）": cur.K < cur.D and prev.K >= prev.D,
+                        "K > D（KD 偏多）": cur.K > cur.D,
+                        "K < D（KD 偏空）": cur.K < cur.D,
+                        "MACD 綠棒趨近零（負柱收斂）": cur.Hist < 0 and cur.Hist > prev.Hist and hist_pct <= macd_zero_tolerance,
+                        "MACD 紅棒趨近零（正柱收斂）": cur.Hist > 0 and cur.Hist < prev.Hist and hist_pct <= macd_zero_tolerance,
+                        "MACD 柱由負翻正": cur.Hist > 0 and prev.Hist <= 0,
+                        "MACD 柱由正翻負": cur.Hist < 0 and prev.Hist >= 0,
                         "收盤站上布林中軌": cur.Close > cur.BB_Mid,
                         "成交量大於 20 日均量 1.5 倍": cur.Volume > cur.VolMA20 * 1.5,
                         "突破前 20 日高點": cur.Close > prior_20_high,
@@ -476,13 +559,18 @@ with tabs[4]:
                     }
                     chosen = selected_technical + selected_chips
                     checks = {**tech_check, **chip_check}
-                    if all(checks[name] for name in chosen):
-                        hit_reasons = [name for name in chosen if checks[name]]
+                    matched = [name for name in chosen if checks[name]]
+                    hit = (all(checks[name] for name in chosen) if match_mode.startswith("全部") else bool(matched)) if chosen else True
+                    if hit:
+                        hit_reasons = matched
                         total_flow = (flow["foreign_lots"] + flow["trust_lots"] + flow["dealer_lots"]) if flow else np.nan
+                        rating = technical_assessment(calc)
                         results.append({
                             "代號": item, "資料日期": calc.index[-1].strftime("%Y-%m-%d"),
                             "收盤": round(float(cur.Close), 2), "日變動%": round(pct_return(calc.Close, 1), 2),
+                            "評分": rating["score"], "判讀": rating["label"],
                             "20日均量(張)": round(avg_volume_lots), "RSI14": round(float(cur.RSI14), 1),
+                            "KD": f"K {float(cur.K):.1f} / D {float(cur.D):.1f}", "MACD柱%": round(float(cur.Hist) / float(cur.Close) * 100, 3),
                             "外資買超(張)": round(flow["foreign_lots"]) if flow else np.nan,
                             "投信買超(張)": round(flow["trust_lots"]) if flow else np.nan,
                             "自營商買超(張)": round(flow["dealer_lots"]) if flow else np.nan,
@@ -493,7 +581,7 @@ with tabs[4]:
                 pass
             bar.progress((i + 1) / len(symbols))
         if results:
-            result_df = pd.DataFrame(results).sort_values(["訊號數", "法人合計(張)", "日變動%"], ascending=[False, False, False], na_position="last")
+            result_df = pd.DataFrame(results).sort_values(["評分", "訊號數", "法人合計(張)"], ascending=[False, False, False], na_position="last")
             st.success(f"找到 {len(result_df)} 檔符合所選條件的候選股。點選代號可帶入上方個股分析。")
             st.dataframe(result_df, hide_index=True, use_container_width=True)
         else:

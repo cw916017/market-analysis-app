@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import re
 import requests
 import streamlit as st
 import yfinance as yf
@@ -28,6 +29,56 @@ def history(symbol: str, period: str = "2y", interval: str = "1d") -> pd.DataFra
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df.dropna(subset=["Close"])
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def taiwan_stock_universe() -> list[str]:
+    """Read current listed/common-stock symbols from TWSE and TPEx public endpoints."""
+    symbols: set[str] = set()
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        rows = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", headers=headers, timeout=20).json()
+        symbols.update(f"{str(row.get('公司代號', '')).strip()}.TW" for row in rows
+                       if re.fullmatch(r"\d{4}", str(row.get("公司代號", "")).strip()))
+    except Exception:
+        pass
+    try:
+        rows = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, timeout=20).json()
+        symbols.update(f"{str(row.get('SecuritiesCompanyCode', '')).strip()}.TWO" for row in rows
+                       if re.fullmatch(r"\d{4}", str(row.get("SecuritiesCompanyCode", "")).strip()))
+    except Exception:
+        pass
+    return sorted(symbols)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def batch_history(symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
+    """Fetch daily history in bounded batches to reduce requests for market-wide scans."""
+    if not symbols:
+        return {}
+    result: dict[str, pd.DataFrame] = {}
+    for start in range(0, len(symbols), 80):
+        batch = list(symbols[start:start + 80])
+        try:
+            frame = yf.download(batch, period="1y", interval="1d", auto_adjust=True,
+                                progress=False, threads=False, group_by="ticker")
+            if frame is None or frame.empty:
+                continue
+            if isinstance(frame.columns, pd.MultiIndex):
+                top = set(map(str, frame.columns.get_level_values(0)))
+                level = 0 if any(symbol in top for symbol in batch) else 1
+                for symbol in batch:
+                    try:
+                        part = frame[symbol] if level == 0 else frame.xs(symbol, axis=1, level=1)
+                        if "Close" in part.columns:
+                            result[symbol] = part.dropna(subset=["Close"])
+                    except (KeyError, ValueError):
+                        continue
+            elif len(batch) == 1 and "Close" in frame.columns:
+                result[batch[0]] = frame.dropna(subset=["Close"])
+        except Exception:
+            continue
+    return result
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -492,9 +543,12 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader("盤後選股雷達")
-    st.markdown("輸入台股代號清單，依技術訊號和最新三大法人買賣超篩選。可選全部符合（AND）或任一符合（OR）；資料以可取得的最新日線為準。")
-    st.caption("目前掃描你提供的代號清單，尚未自動遍歷全部上市櫃股票；上市代號加 .TW、上櫃代號加 .TWO。")
+    st.markdown("依技術訊號篩選盤後候選股。可掃描自選清單或全市場上市櫃股票；條件可選全部符合（AND）或任一符合（OR）。")
+    scan_scope = st.radio("掃描範圍", ["自選清單", "上市櫃全市場"], horizontal=True)
     watch = st.text_area("掃描清單（上市 .TW、上櫃 .TWO，以逗號或換行分隔）", DEFAULT_WATCHLIST, height=90)
+    universe = taiwan_stock_universe() if scan_scope == "上市櫃全市場" else []
+    if scan_scope == "上市櫃全市場":
+        st.caption(f"從證交所與櫃買中心公開清單取得 {len(universe):,} 檔代號。全市場掃描可能需要數分鐘；行情使用 Yahoo Finance 日線。")
     technical_options = [
         "收盤站上 MA20", "MA5 高於 MA20", "MACD 柱為正", "MACD 柱較前日增加",
         "RSI > 70（偏熱）", "RSI < 30（超賣觀察）", "RSI 約 50（45–55）",
@@ -513,12 +567,17 @@ with tabs[4]:
     selected_chips = st.multiselect("籌碼條件（最新交易日）", chip_options)
     min_avg_volume = st.number_input("最低 20 日均量（張）", min_value=0, max_value=100000, value=100, step=100)
     if st.button("執行盤後選股", type="primary"):
-        symbols = list(dict.fromkeys(x.strip().upper() for x in watch.replace("\n", ",").split(",") if x.strip()))
+        if scan_scope == "上市櫃全市場" and selected_chips:
+            st.warning("全市場模式目前支援技術條件；如需加上三大法人條件，請切換自選清單，避免大量重複呼叫籌碼資料來源。")
+            symbols = []
+        else:
+            symbols = universe if scan_scope == "上市櫃全市場" else list(dict.fromkeys(x.strip().upper() for x in watch.replace("\n", ",").split(",") if x.strip()))
+        bulk_data = batch_history(tuple(symbols)) if scan_scope == "上市櫃全市場" and symbols else {}
         results = []
         bar = st.progress(0)
         for i, item in enumerate(symbols):
             try:
-                data = history(item, "1y", "1d")
+                data = bulk_data.get(item, pd.DataFrame()) if scan_scope == "上市櫃全市場" else history(item, "1y", "1d")
                 if len(data) >= 61:
                     calc = indicators(data)
                     cur, prev = calc.iloc[-1], calc.iloc[-2]
